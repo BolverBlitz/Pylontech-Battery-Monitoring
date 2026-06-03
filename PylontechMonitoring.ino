@@ -346,7 +346,7 @@ struct pylonBattery
 {
   bool isPresent;
   long  soc;     //Coulomb in %
-  long  voltage; //in mW
+  long  voltage; //in mV
   long  current; //in mA, negative value is discharge
   long  tempr;   //temp of case or BMS?
   long  cellTempLow;
@@ -410,13 +410,13 @@ struct batteryStack
     return true;
   }
 
-  //in wH
+  //in W
   long getPowerDC() const
   {
     return (long)(((double)currentDC/1000.0)*((double)avgVoltage/1000.0));
   }
 
-  //wH estimated current on AC side (taking into account Sofar ME3000SP losses)
+  //W estimated power on AC side (taking into account Sofar ME3000SP losses)
   long getEstPowerAc() const
   {
     double powerDC = (double)getPowerDC();
@@ -776,6 +776,7 @@ void pushBatteryDataToMqtt(const batteryStack& lastSentData, bool forceUpdate /*
 {
   mqtt_publish_f(MQTT_TOPIC_ROOT "soc",          g_stack.soc,                lastSentData.soc,                0, forceUpdate);
   mqtt_publish_f(MQTT_TOPIC_ROOT "temp",         (float)g_stack.temp/1000.0, (float)lastSentData.temp/1000.0, 0, forceUpdate);
+  mqtt_publish_i(MQTT_TOPIC_ROOT "powerDC",      g_stack.getPowerDC(),       lastSentData.getPowerDC(),      10, forceUpdate);
   mqtt_publish_i(MQTT_TOPIC_ROOT "estPowerAC",   g_stack.getEstPowerAc(),    lastSentData.getEstPowerAc(),   10, forceUpdate);
   mqtt_publish_i(MQTT_TOPIC_ROOT "battery_count",g_stack.batteryCount,       lastSentData.batteryCount,       0, forceUpdate);
   mqtt_publish_s(MQTT_TOPIC_ROOT "base_state",   g_stack.baseState,          lastSentData.baseState            , forceUpdate);
