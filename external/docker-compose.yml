@@ -1,0 +1,43 @@
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    container_name: prometheus
+    volumes:
+      - ./prometheus:/etc/prometheus
+      - ./prom_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=24h'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9091:9090"
+    depends_on:
+      - victoriametrics
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    restart: unless-stopped
+    container_name: victoria
+    ports:
+      - "8428:8428"
+    volumes:
+      - ./victoria_data:/storage
+    command:
+      - "-retentionPeriod=10y"
+      - "-storageDataPath=/storage"
+      - "-selfScrapeInterval=60s"
+
+  loki:
+    image: grafana/loki:latest
+    restart: unless-stopped
+    container_name: loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - ./loki_data:/loki
+    command:
+      - "-config.file=/etc/loki/loki-config.yml"

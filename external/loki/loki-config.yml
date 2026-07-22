@@ -1,0 +1,65 @@
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  replication_factor: 1
+
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+ingester:
+  chunk_idle_period: 30m
+  max_chunk_age: 2h
+  chunk_target_size: 1572864
+  chunk_encoding: gzip
+
+  wal:
+    enabled: true
+    dir: /loki/wal
+
+
+schema_config:
+  configs:
+    - from: 2020-05-15
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /loki/index
+    cache_location: /loki/index_cache
+
+  filesystem:
+    directory: /loki/chunks
+
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+
+  retention_enabled: true
+  retention_delete_delay: 2h
+  delete_request_store: filesystem
+
+limits_config:
+  # Default retention for streams without a matching rule (90 Days)
+  retention_period: 2160h
+
+  retention_stream:
+    # IoT data: ~10 years
+    - selector: '{data_type="iot"}'
+      priority: 10
+      period: 87600h
+
+    # Program logs: ~3 months
+    - selector: '{data_type="program"}'
+      priority: 5
+      period: 2160h

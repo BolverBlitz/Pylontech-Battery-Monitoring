@@ -28,6 +28,57 @@ The MQTT refresh interval is configured there and defaults to 10 seconds. `/metr
 
 `MQTT_VALUE_PREFIX` in `platformio.local.ini` controls the legacy MQTT value prefix. With topic root `Pylontech` and prefix `US2000CBattery`, SOC is published as `Pylontech/US2000CBatterysoc`.
 
+## Optional external monitoring stack
+
+The `external` directory contains a small Docker Compose monitoring stack:
+
+### Why this stack?
+
+- **Prometheus** scrapes the ESP's `/metrics` endpoint and handles metric collection.
+- **VictoriaMetrics** provides efficient long-term metric storage with very good compression.
+- **Loki** stores battery event logs, making it easier to investigate when a battery reports an error or changes state unexpectedly.
+
+- [`external/docker-compose.yml`](external/docker-compose.yml) starts Prometheus, VictoriaMetrics, and Loki with persistent local data directories.
+- [`external/prometheus/prometheus.yml`](external/prometheus/prometheus.yml) scrapes the ESP every 30 seconds. Change `192.168.5.45:80` to your ESP address.
+- [`external/loki/loki-config.yml`](external/loki/loki-config.yml) stores IoT streams for up to ten years. Configure the ESP Loki URI as `http://<docker-host>:3100/loki/api/v1/push`.
+
+Install Docker with Compose, then start the services from the repository root:
+
+```console
+cd external
+docker compose up -d
+docker compose ps
+```
+
+Prometheus is exposed on port `9091`, VictoriaMetrics on `8428`, and Loki on `3100`. Ensure the ESP network can reach the Docker host on the required ports. The included Prometheus configuration scrapes locally but does not remote-write into VictoriaMetrics unless you add that configuration yourself.
+
+## Home Assistant MQTT sensors
+
+First connect Home Assistant to the same MQTT broker used by the ESP. Add the following to Home Assistant's `config/configuration.yaml`, then validate the configuration and restart Home Assistant. If an `mqtt:` section already exists, merge these entries into its existing `sensor:` list instead of adding a second `mqtt:` key.
+
+```yaml
+mqtt:
+  sensor:
+    # =========================================
+    # PYLONTECH MQTT
+    # =========================================
+    - name: "Battery Raw Power"
+      state_topic: "Pylontech/US2000CBatterypowerDC"
+      value_template: "{{ value }}"
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+
+    - name: "Battery State of Charge"
+      state_topic: "Pylontech/US2000CBatterysoc"
+      value_template: "{{ value }}"
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+```
+
+The topics must match the ESP's MQTT topic root and `MQTT_VALUE_PREFIX` settings.
+
 ## Source layout
 
 - `src/main.cpp` owns shared state and composes setup/loop.
