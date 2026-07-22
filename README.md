@@ -3,6 +3,43 @@
 This project allows you to control and monitor Pylontech US2000B, US2000C, US3000C and US5000 batteries via console port over WiFi.
 It it's a great starting point to integrate battery with your home automation.
 
+## PlatformIO setup
+
+1. Copy `platformio.local.example.ini` to `platformio.local.ini`.
+2. Set WiFi and hostname values in `platformio.local.ini`.
+3. Build with `pio run` (or `py -m platformio run`).
+4. Flash the first installation with `pio run --target upload`.
+
+`platformio.local.ini` is ignored by Git. PlatformIO injects its values as build definitions. The default target is a Wemos D1 mini; change `board` in `platformio.ini` when using another ESP8266 board. The resulting OTA image is `.pio/build/esp8266/firmware.bin`.
+
+Run `./build.ps1` to build and copy the OTA image to `firmware.bin` in the project root.
+
+The web UI at `/` includes a drag-and-drop firmware updater. Drop the generated `firmware.bin` onto it; the ESP validates and writes the image, then reboots after success. ArduinoOTA remains available using `OTA_HOSTNAME`.
+
+Prometheus can scrape `/metrics`. It exposes the same `power`, `battery`, and `battery_stat` metric families, names, labels, state codes, and unit conversions as Pylontech-Battery-Exporter. Each scrape queries `pwr` and `bat N`; `stat N` values are cached for one hour. The namespace defaults to `devicemon` and is changed at `/settings`.
+
+MQTT, Loki, the Prometheus namespace, optional ESP free-heap metric, and the NTP server are configured at `/settings`. Values are stored in LittleFS and survive reboot and OTA firmware updates.
+
+Loki support is disabled by default. Set its full `http://.../loki/api/v1/push` URI, data type, and service name, then enable it. The logger reads new battery `log` entries every five minutes and uses each entry's `ModID` as the Loki `device` label. `/settings` shows the last attempt, connection result, event counts, network route, next run, and a manual run button. The same details are available as JSON at `/logger-status`.
+
+The dashboard displays ESP and battery time. ESP time is shown in Europe/Berlin with automatic MEZ/MESZ conversion. The sync button sets the ESP and battery clocks from the browser's local PC time.
+
+The MQTT refresh interval is configured there and defaults to 10 seconds. `/metrics` collects a complete fresh dataset on each request and returns it as one response.
+
+`MQTT_VALUE_PREFIX` in `platformio.local.ini` controls the legacy MQTT value prefix. With topic root `Pylontech` and prefix `US2000CBattery`, SOC is published as `Pylontech/US2000CBatterysoc`.
+
+## Source layout
+
+- `src/main.cpp` owns shared state and composes setup/loop.
+- `src/communication.cpp` handles the Pylontech serial protocol, time sync, parsing, and battery models.
+- `src/settings.cpp` handles LittleFS persistence and settings migration.
+- `src/web.cpp` contains HTTP handlers, JSON output, and Prometheus exposition.
+- `src/ota.cpp` handles browser firmware uploads.
+- `src/mqtt.cpp` handles MQTT publishing and reconnects.
+- `src/logger.cpp` polls battery events and pushes them to Loki.
+
+The focused source files are composed through `main.cpp` as one translation unit. `build_src_filter` prevents PlatformIO from compiling them a second time. This preserves the firmware's existing shared state and memory footprint without exposing mutable globals through a broad internal API.
+
 **I ACCEPT NO RESPONSIBILTY FOR ANY DAMAGE CAUSED, PROCEED AT YOUR OWN RISK**
 
 # Features:

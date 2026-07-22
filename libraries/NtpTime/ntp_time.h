@@ -3,9 +3,6 @@
 
 #include <WiFiUdp.h>
 
-// NTP Servers:
-static const char ntpServerName[] = "0.uk.pool.ntp.org";
-const int timeZone = 0;
 unsigned int localPort = 8888;       // local port to listen for UDP packets
 
 /*-------- NTP code ----------*/
@@ -38,7 +35,7 @@ void sendNTPpacket(IPAddress &address)
 }
 
 
-time_t getNtpTime()
+time_t getNtpTime(const char* serverName)
 {
   if(WiFi.status() != WL_CONNECTED)
   {
@@ -56,7 +53,10 @@ time_t getNtpTime()
 
   while (udpNtp.parsePacket() > 0) ; // discard any previously received packets
   // get a random server from the pool
-  WiFi.hostByName(ntpServerName, ntpServerIP);
+  if(WiFi.hostByName(serverName, ntpServerIP) != 1)
+  {
+    return 0;
+  }
   sendNTPpacket(ntpServerIP);
   delay(100);
   
@@ -71,7 +71,7 @@ time_t getNtpTime()
       secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
       secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
       secsSince1900 |= (unsigned long)packetBuffer[43];
-      return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
+      return secsSince1900 - 2208988800UL;
     }
 
     delay(10);

@@ -290,6 +290,11 @@ ehthumbs.db
 # Folder config file
 Desktop.ini
 
+# PlatformIO build output
+.pio/
+firmware.bin
+platformio.local.ini
+
 # Recycle Bin used on file shares
 $RECYCLE.BIN/
 

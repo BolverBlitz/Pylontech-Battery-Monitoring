@@ -1,95 +1,3 @@
-#include <ESP8266WiFi.h>
-#include <ESP8266mDNS.h>
-#include <ArduinoOTA.h>
-#include <ESP8266WebServer.h>
-#include <ESP8266WebServer.h>
-#include <SimpleTimer.h>
-#include <TimeLib.h> //https://github.com/PaulStoffregen/Time
-#include <ntp_time.h>
-#include <circular_log.h>
-
-
-//IMPORTANT: Specify your WIFI settings:
-#define WIFI_SSID "--YOUR SSID HERE --"
-#define WIFI_PASS "-- YOUR PASSWORD HERE --"
-
-//IMPORTANT: Uncomment this line if you want to enable MQTT (and fill correct MQTT_ values below):
-//#define ENABLE_MQTT
-
-#ifdef ENABLE_MQTT
-//NOTE 1: if you want to change what is pushed via MQTT - edit function: pushBatteryDataToMqtt.
-//NOTE 2: MQTT_TOPIC_ROOT is where battery will push MQTT topics. For example "soc" will be pushed to: "home/grid_battery/soc"
-#define MQTT_SERVER        "192.168.0.6"
-#define MQTT_PORT          1883
-#define MQTT_USER          ""
-#define MQTT_PASSWORD      ""
-#define MQTT_TOPIC_ROOT    "home/grid_battery/"  //this is where mqtt data will be pushed
-#define MQTT_PUSH_FREQ_SEC 2  //maximum mqtt update frequency in seconds
-
-#include <PubSubClient.h>
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-#endif //ENABLE_MQTT
-
-char g_szRecvBuff[7000];
-
-ESP8266WebServer server(80);
-SimpleTimer timer;
-circular_log<7000> g_log;
-bool ntpTimeReceived = false;
-int g_baudRate = 0;
-
-void Log(const char* msg)
-{
-  g_log.Log(msg);
-}
-
-void setup() {
-  pinMode(LED_BUILTIN, OUTPUT); 
-  digitalWrite(LED_BUILTIN, HIGH);//high is off
-  
-  // put your setup code here, to run once:
-  WiFi.mode(WIFI_STA);
-  WiFi.persistent(false); //our credentialss are hardcoded, so we don't need ESP saving those each boot (will save on flash wear)
-  WiFi.hostname("PylontechBattery");
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-  for(int ix=0; ix<10; ix++)
-  {
-    if(WiFi.status() == WL_CONNECTED)
-    {
-      break;
-    }
-
-    delay(1000);
-  }
-
-  ArduinoOTA.setHostname("GarageBattery");
-  ArduinoOTA.begin();
-  server.on("/", handleRoot);
-  server.on("/log", handleLog);
-  server.on("/req", handleReq);
-  server.on("/jsonOut", handleJsonOut);
-  server.on("/reboot", [](){
-    ESP.restart();
-  });
-  
-  server.begin(); 
-  
-  syncTime();
-
-#ifdef ENABLE_MQTT
-  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-#endif
-
-  Log("Boot event");
-}
-
-void handleLog()
-{
-  server.send(200, "text/html", g_log.c_str());
-}
-
 void switchBaud(int newRate)
 {
   if(g_baudRate == newRate)
@@ -115,27 +23,27 @@ void switchBaud(int newRate)
   delay(20);
 }
 
-void waitForSerial()
+void waitForSerial(int loops)
 {
-  for(int ix=0; ix<150;ix++)
+  for(int ix=0; ix<loops;ix++)
   {
     if(Serial.available()) break;
     delay(10);
   }
 }
 
-int readFromSerial()
+int readFromSerial(int waitLoops = 150)
 {
   memset(g_szRecvBuff, 0, sizeof(g_szRecvBuff));
   int recvBuffLen = 0;
-  bool foundTerminator = true;
+  bool foundTerminator = false;
   
-  waitForSerial();
+  waitForSerial(waitLoops);
   
   while(Serial.available())
   {
     char szResponse[256] = "";
-    const int readNow = Serial.readBytesUntil('>', szResponse, sizeof(szResponse)-1); //all commands terminate with "$$\r\n\rpylon>" (no new line at the end)
+    const int readNow = Serial.readBytesUntil('>', szResponse, sizeof(szResponse)-1);
     if(readNow > 0 && 
        szResponse[0] != '\0')
     {
@@ -148,7 +56,8 @@ int readFromSerial()
       strcat(g_szRecvBuff, szResponse);
       recvBuffLen += readNow;
 
-      if(strstr(g_szRecvBuff, "$$\r\n\rpylon"))
+      const size_t responseLength = strlen(g_szRecvBuff);
+      if(responseLength >= 5 && strcmp(g_szRecvBuff + responseLength - 5, "pylon") == 0)
       {
         strcat(g_szRecvBuff, ">"); //readBytesUntil will skip this, so re-add
         foundTerminator = true;
@@ -161,7 +70,7 @@ int readFromSerial()
         Serial.write("\r");
       }
 
-      waitForSerial();
+      waitForSerial(waitLoops);
     }
   }
 
@@ -188,9 +97,12 @@ bool readFromSerialAndSendResponse()
   return false;
 }
 
-bool sendCommandAndReadSerialResponse(const char* pszCommand)
+bool sendCommandAndReadSerialResponse(const char* pszCommand, bool wakeRetry, int waitLoops)
 {
   switchBaud(115200);
+
+  // Discard bytes left by a previous background command.
+  while(Serial.available()) Serial.read();
 
   if(pszCommand[0] != '\0')
   {
@@ -198,13 +110,17 @@ bool sendCommandAndReadSerialResponse(const char* pszCommand)
   }
   Serial.write("\n");
 
-  const int recvBuffLen = readFromSerial();
-  if(recvBuffLen > 0)
+  const int recvBuffLen = readFromSerial(waitLoops);
+  const bool complete = strstr(g_szRecvBuff, "pylon>") != NULL;
+  const bool rejected = strstr(g_szRecvBuff, "Unknown command") != NULL;
+  if(recvBuffLen > 0 && !rejected && (pszCommand[0] == '\0' || complete))
   {
     return true;
   }
 
-  //wake up console and try again:
+  if(!wakeRetry) return false;
+
+  // Wake the console and retry foreground requests.
   wakeUpConsole();
 
   if(pszCommand[0] != '\0')
@@ -213,69 +129,10 @@ bool sendCommandAndReadSerialResponse(const char* pszCommand)
   }
   Serial.write("\n");
 
-  return readFromSerial() > 0;
-}
-
-void handleReq()
-{
-  bool respOK;
-  if(server.hasArg("code") == false)
-  {
-    respOK = sendCommandAndReadSerialResponse("");
-  }
-  else
-  {
-    respOK = sendCommandAndReadSerialResponse(server.arg("code").c_str());
-  }
-
-  if(respOK)
-  {
-    server.send(200, "text/plain", g_szRecvBuff);
-  }
-  else
-  {
-    server.send(500, "text/plain", "????");
-  }
-}
-
-void handleJsonOut()
-{
-  if(sendCommandAndReadSerialResponse("pwr") == false)
-  {
-    server.send(500, "text/plain", "Failed to get response to 'pwr' command");
-    return;
-  }
-
-  parsePwrResponse(g_szRecvBuff);
-  prepareJsonOutput(g_szRecvBuff, sizeof(g_szRecvBuff));
-  server.send(200, "application/json", g_szRecvBuff);
-}
-
-void handleRoot() {
-  unsigned long days = 0, hours = 0, minutes = 0;
-  unsigned long val = os_getCurrentTimeSec();
-  
-  days = val / (3600*24);
-  val -= days * (3600*24);
-  
-  hours = val / 3600;
-  val -= hours * 3600;
-  
-  minutes = val / 60;
-  val -= minutes*60;
-  
-  static char szTmp[2500] = "";  
-  snprintf(szTmp, sizeof(szTmp)-1, "<html><b>Garage Battery</b><br>Time GMT: %d/%02d/%02d %02d:%02d:%02d (%s)<br>Uptime: %02d:%02d:%02d.%02d<br><br>free heap: %u<br>Wifi RSSI: %d<BR>Wifi SSID: %s", 
-            year(), month(), day(), hour(), minute(), second(), "GMT",
-            (int)days, (int)hours, (int)minutes, (int)val, 
-            ESP.getFreeHeap(), WiFi.RSSI(), WiFi.SSID().c_str());
-
-
-  strncat(szTmp, "<BR><a href='/log'>Runtime log</a><HR>", sizeof(szTmp)-1);
-  strncat(szTmp, "<form action='/req' method='get'>Command:<input type='text' name='code'/><input type='submit'></form><a href='/req?code=pwr'>Power</a> | <a href='/req?code=help'>Help</a> | <a href='/req?code=log'>Event Log</a> | <a href='/req?code=time'>Time</a>", sizeof(szTmp)-1);
-  strncat(szTmp, "</html>", sizeof(szTmp)-1);
-  
-  server.send(200, "text/html", szTmp);
+  const int retryLength = readFromSerial();
+  return retryLength > 0 &&
+         strstr(g_szRecvBuff, "Unknown command") == NULL &&
+         (pszCommand[0] == '\0' || strstr(g_szRecvBuff, "pylon>") != NULL);
 }
 
 unsigned long os_getCurrentTimeSec()
@@ -298,12 +155,12 @@ unsigned long os_getCurrentTimeSec()
 
 void syncTime()
 {
-  //get time from NTP
-  time_t currentTimeGMT = getNtpTime();
+  time_t currentTimeGMT = getNtpTime(mqttSettings.ntpServer);
   if(currentTimeGMT)
   {
     ntpTimeReceived = true;
     setTime(currentTimeGMT);
+    timer.setTimeout(NTP_RESYNC_INTERVAL_MS, syncTime);
   }  
   else
   {
@@ -320,7 +177,7 @@ void wakeUpConsole()
   Serial.write("~20014682C0048520FCC3\r");
   delay(1000);
 
-  byte newLineBuff[] = {0x0E, 0x0A};
+  byte newLineBuff[] = {0x0D, 0x0A};
   switchBaud(115200);
   
   for(int ix=0; ix<10; ix++)
@@ -340,8 +197,6 @@ void wakeUpConsole()
   }
 }
 
-#define MAX_PYLON_BATTERIES 8
-
 struct pylonBattery
 {
   bool isPresent;
@@ -360,6 +215,7 @@ struct pylonBattery
   char time[20];        //2019-06-08 04:00:29
   char b_v_st[9];       //Normal  (battery voltage?)
   char b_t_st[9];       //Normal  (battery temperature?)
+  char mosTempr[12];
 
   bool isCharging()    const { return strcmp(baseState, "Charge")   == 0; }
   bool isDischarging() const { return strcmp(baseState, "Dischg")   == 0; }
@@ -543,13 +399,6 @@ int findOffset(const char *pStr, const char *param)
     return -1; /* "Power" line not found */
 }
 
-#define DECL_FIND_OFFSET_OR_FAIL(var, str, key)   \
-    int var = findOffset((str), (key));           \
-    if ((var) == -1) {                            \
-        Log(key " not found");                    \
-        return false;                             \
-    }
-
 bool parsePwrResponse(const char* pStr)
 {
   if(strstr(pStr, "Command completed successfully") == NULL)
@@ -583,6 +432,8 @@ bool parsePwrResponse(const char* pStr)
   DECL_FIND_OFFSET_OR_FAIL(offset13, pStr,"Vlow ");
   DECL_FIND_OFFSET_OR_FAIL(offset14, pStr,"Vhigh ");    
   DECL_FIND_OFFSET_OR_FAIL(offset15, pStr,"Coulomb ");
+  int offsetMos = findOffset(pStr, "MosTempr");
+  if(offsetMos < 0) offsetMos = findOffset(pStr, "MosTemp");
   
   for(int ix=0; ix<MAX_PYLON_BATTERIES; ix++)
   {
@@ -626,6 +477,7 @@ bool parsePwrResponse(const char* pStr)
       g_stack.batts[ix].cellVoltLow    = extractInt(pLineStart, offset13);
       g_stack.batts[ix].cellVoltHigh   = extractInt(pLineStart, offset14);
       g_stack.batts[ix].soc            = extractInt(pLineStart, offset15);
+      if(offsetMos >= 0) extractStr(pLineStart, offsetMos, g_stack.batts[ix].mosTempr, sizeof(g_stack.batts[ix].mosTempr));
 
       //////////////////////////////// Post-process ////////////////////////
       g_stack.batteryCount++;
@@ -695,135 +547,3 @@ bool parsePwrResponse(const char* pStr)
 
   return true;
 }
-
-void prepareJsonOutput(char* pBuff, int buffSize)
-{
-  memset(pBuff, 0, buffSize);
-  snprintf(pBuff, buffSize-1, "{\"soc\": %d, \"temp\": %d, \"currentDC\": %ld, \"avgVoltage\": %ld, \"baseState\": \"%s\", \"batteryCount\": %d, \"powerDC\": %ld, \"estPowerAC\": %ld, \"isNormal\": %s}", g_stack.soc, 
-                                                                                                                                                                                                            g_stack.temp, 
-                                                                                                                                                                                                            g_stack.currentDC, 
-                                                                                                                                                                                                            g_stack.avgVoltage, 
-                                                                                                                                                                                                            g_stack.baseState, 
-                                                                                                                                                                                                            g_stack.batteryCount, 
-                                                                                                                                                                                                            g_stack.getPowerDC(), 
-                                                                                                                                                                                                            g_stack.getEstPowerAc(),
-                                                                                                                                                                                                            g_stack.isNormal() ? "true" : "false");
-}
-
-void loop() {
-#ifdef ENABLE_MQTT
-  mqttLoop();
-#endif
-  
-  ArduinoOTA.handle();
-  server.handleClient();
-  timer.run();
-
-  //if there are bytes availbe on serial here - it's unexpected
-  //when we send a command to battery, we read whole response
-  //if we get anything here anyways - we will log it
-  int bytesAv = Serial.available();
-  if(bytesAv > 0)
-  {
-    if(bytesAv > 63)
-    {
-      bytesAv = 63;
-    }
-    
-    char buff[64+4] = "RCV:";
-    if(Serial.readBytes(buff+4, bytesAv) > 0)
-    {
-      digitalWrite(LED_BUILTIN, LOW);
-      delay(5);
-      digitalWrite(LED_BUILTIN, HIGH);//high is off
-
-      Log(buff);
-    }
-  }
-}
-
-#ifdef ENABLE_MQTT
-#define ABS_DIFF(a, b) (a > b ? a-b : b-a)
-void mqtt_publish_f(const char* topic, float newValue, float oldValue, float minDiff, bool force)
-{
-  char szTmp[16] = "";
-  snprintf(szTmp, 15, "%.2f", newValue);
-  if(force || ABS_DIFF(newValue, oldValue) > minDiff)
-  {
-    mqttClient.publish(topic, szTmp, false);
-  }
-}
-
-void mqtt_publish_i(const char* topic, int newValue, int oldValue, int minDiff, bool force)
-{
-  char szTmp[16] = "";
-  snprintf(szTmp, 15, "%d", newValue);
-  if(force || ABS_DIFF(newValue, oldValue) > minDiff)
-  {
-    mqttClient.publish(topic, szTmp, false);
-  }
-}
-
-void mqtt_publish_s(const char* topic, const char* newValue, const char* oldValue, bool force)
-{
-  if(force || strcmp(newValue, oldValue) != 0)
-  {
-    mqttClient.publish(topic, newValue, false);
-  }
-}
-
-void pushBatteryDataToMqtt(const batteryStack& lastSentData, bool forceUpdate /* if true - we will send all data regardless if it's the same */)
-{
-  mqtt_publish_f(MQTT_TOPIC_ROOT "soc",          g_stack.soc,                lastSentData.soc,                0, forceUpdate);
-  mqtt_publish_f(MQTT_TOPIC_ROOT "temp",         (float)g_stack.temp/1000.0, (float)lastSentData.temp/1000.0, 0, forceUpdate);
-  mqtt_publish_i(MQTT_TOPIC_ROOT "powerDC",      g_stack.getPowerDC(),       lastSentData.getPowerDC(),      10, forceUpdate);
-  mqtt_publish_i(MQTT_TOPIC_ROOT "estPowerAC",   g_stack.getEstPowerAc(),    lastSentData.getEstPowerAc(),   10, forceUpdate);
-  mqtt_publish_i(MQTT_TOPIC_ROOT "battery_count",g_stack.batteryCount,       lastSentData.batteryCount,       0, forceUpdate);
-  mqtt_publish_s(MQTT_TOPIC_ROOT "base_state",   g_stack.baseState,          lastSentData.baseState            , forceUpdate);
-  mqtt_publish_i(MQTT_TOPIC_ROOT "is_normal",    g_stack.isNormal() ? 1:0,   lastSentData.isNormal() ? 1:0,   0, forceUpdate);
-}
-
-void mqttLoop()
-{
-  //if we have problems with connecting to mqtt server, we will attempt to re-estabish connection each 1minute (not more than that)
-  static unsigned long g_lastConnectionAttempt = 0;
-
-  //first: let's make sure we are connected to mqtt
-  const char* topicLastWill = MQTT_TOPIC_ROOT "availability";
-  if (!mqttClient.connected() && (g_lastConnectionAttempt == 0 || os_getCurrentTimeSec() - g_lastConnectionAttempt > 60)) {
-    if(mqttClient.connect("GarageBattery", MQTT_USER, MQTT_PASSWORD, topicLastWill, 1, true, "offline"))
-    {
-      Log("Connected to MQTT server: " MQTT_SERVER);
-      mqttClient.publish(topicLastWill, "online", true);
-    }
-    else
-    {
-      Log("Failed to connect to MQTT server.");
-    }
-
-    g_lastConnectionAttempt = os_getCurrentTimeSec();
-  }
-
-  //next: read data from battery and send via MQTT (but only once per MQTT_PUSH_FREQ_SEC seconds)
-  static unsigned long g_lastDataSent = 0;
-  if(mqttClient.connected() && 
-     os_getCurrentTimeSec() - g_lastDataSent > MQTT_PUSH_FREQ_SEC &&
-     sendCommandAndReadSerialResponse("pwr") == true)
-  {
-    static batteryStack lastSentData; //this is the last state we sent to MQTT, used to prevent sending the same data over and over again
-    static unsigned int callCnt = 0;
-    
-    parsePwrResponse(g_szRecvBuff);
-
-    bool forceUpdate = (callCnt % 20 == 0); //push all the data every 20th call
-    pushBatteryDataToMqtt(lastSentData, forceUpdate);
-    
-    callCnt++;
-    g_lastDataSent = os_getCurrentTimeSec();
-    memcpy(&lastSentData, &g_stack, sizeof(batteryStack));
-  }
-  
-  mqttClient.loop();
-}
-
-#endif //ENABLE_MQTT
